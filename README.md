@@ -1,10 +1,18 @@
 # Payments Ledger
 
 [![CI](https://github.com/SanicaVinayakMyana/payments-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/SanicaVinayakMyana/payments-ledger/actions/workflows/ci.yml)
+![Java 21](https://img.shields.io/badge/Java-21-orange)
+![Coverage 94%](https://img.shields.io/badge/line%20coverage-94%25-brightgreen)
+![License MIT](https://img.shields.io/badge/license-MIT-blue)
 
-A multi-currency, double-entry payments ledger: the core of a wallet or banking backend. It moves money
-between accounts with **no balance drift under concurrency**, **exactly-once retries via idempotency keys**,
-and **correct currency handling** (minor units, banker's rounding, FX through treasury pools).
+A multi-currency, double-entry payments ledger with a web dashboard: the core of a wallet or banking backend.
+It moves money between accounts with **no balance drift under concurrency**, **exactly-once retries via
+idempotency keys**, and **correct currency handling** (minor units, banker's rounding, FX through treasury pools).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
+  <img alt="Payments Ledger dashboard: account balances, a transfer form with an Idempotency-Key, and recent transactions" src="docs/images/dashboard-light.png">
+</picture>
 
 **Stack:** Java 21 (records, sealed types, virtual threads) · Javalin · jOOQ (code generated from the migrations) ·
 PostgreSQL 16 · Flyway · Redis · Spock + Testcontainers · Gatling · Docker · GitHub Actions · GCP Cloud Run
@@ -14,30 +22,64 @@ PostgreSQL 16 · Flyway · Redis · Spock + Testcontainers · Gatling · Docker 
 | 10,000 concurrent transfers, zero drift, no deadlocks | [`ConcurrentTransfersSpec`](src/test/groovy/com/sanica/ledger/service/ConcurrentTransfersSpec.groovy): 32 threads, mixed EUR/USD/GBP |
 | Retries never move money twice | [`IdempotencyServiceSpec`](src/test/groovy/com/sanica/ledger/idempotency/IdempotencyServiceSpec.groovy): 50 clients race on one key, exactly 1 transfer |
 | Throughput and latency | [Gatling results](docs/load-test-results.md): 819 req/s at p95 17 ms / p99 56 ms, 5,316 req/s unpaced |
-| 94.2% line coverage | JaCoCo; the build fails below 90% |
+| 72 tests, 94.2% line coverage | JaCoCo; the build fails below 90% |
 
----
+## Contents
+
+- [Quick start](#quick-start)
+- [Dashboard](#dashboard)
+- [Architecture](#architecture)
+- [Design decisions](#design-decisions)
+- [API](#api)
+- [Testing](#testing)
+- [Load testing](#load-testing)
+- [Deployment](#deployment)
+- [Tech stack](#tech-stack)
+
+## Quick start
+
+**Requirement:** JDK 21 (for example [Eclipse Temurin](https://adoptium.net/)). Docker is optional.
+
+```bash
+git clone https://github.com/SanicaVinayakMyana/payments-ledger.git
+cd payments-ledger
+./gradlew runLocal
+```
+
+Open **http://localhost:8080**. `runLocal` starts a throwaway PostgreSQL (in Docker if available, otherwise
+embedded binaries), runs the migrations and serves the API and the dashboard on port 8080. On Windows, use
+`.\gradlew.bat runLocal`. Click **Load demo data** to fill an empty ledger.
+
+**Full stack** with PostgreSQL 16 and Redis 7 in containers:
+
+```bash
+docker compose up --build
+```
+
+Configuration (environment variables): `PORT` (8080), `DB_URL`, `DB_USER`, `DB_PASSWORD`, `DB_POOL_SIZE` (20),
+`REDIS_URL` (optional; without it, idempotency is served from PostgreSQL alone).
 
 ## Dashboard
 
-`./gradlew runLocal`, then open **http://localhost:8080**. The same server that hosts the API serves a dashboard
-(plain HTML, CSS and JavaScript in [`src/main/resources/public`](src/main/resources/public), no build step,
-no external CDNs):
+The same server that hosts the API serves the dashboard at `/`. It is plain HTML, CSS and JavaScript in
+[`src/main/resources/public`](src/main/resources/public): no build step, no framework, no external CDNs.
 
-- **Accounts:** open accounts, see balances, open a statement drawer per account.
-- **Move money:** deposits and transfers with an auto-generated `Idempotency-Key`, a live FX preview for
-  cross-currency transfers, and a **Send again with the same key** button that shows the replay (no money moves twice).
-- **Recent transactions:** select a row to see its double-entry journal, with each currency's lines summing to zero.
-- **Health and reconciliation** status in the header, and **Load demo data** for an empty ledger.
+- **Accounts:** open accounts in six currencies, see balances, open a statement drawer for any account.
+- **Move money:** deposits and transfers. Every request gets an auto-generated `Idempotency-Key`, and
+  cross-currency transfers show a live FX preview. **Send again with the same key** demonstrates the replay:
+  the response is marked *Replayed · no money moved* and balances do not change.
+- **Recent transactions:** select a row to see its double-entry journal. Each currency's lines sum to zero.
+- **Status:** API health and the reconciliation result in the header. **Load demo data** appears while the ledger is empty.
 
-Money in the browser is summed in integer minor units (`BigInt`), never floats, like the server. User text is
-always inserted as text, never as HTML. Light and dark themes follow the system setting, and the layout works on phones.
+Money in the browser is summed in integer minor units (`BigInt`), never floats, like the server. User-supplied text
+is inserted as text, never as HTML. Light and dark themes follow the system setting, and the layout works at phone width.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    C[Client] -->|"POST /transfers + Idempotency-Key"| API[Javalin API<br/>virtual threads]
+    B[Browser dashboard] -->|"static files + JSON API"| API[Javalin<br/>virtual threads]
+    C[API clients] -->|"POST /transfers + Idempotency-Key"| API
     API --> IDEM[IdempotencyService]
     IDEM -->|"cache lookup"| R[(Redis<br/>response cache)]
     IDEM -->|"one DB transaction"| L[LedgerService]
@@ -47,12 +89,19 @@ flowchart LR
 ```
 src/main/java/com/sanica/ledger
 ├── Application.java          wiring and lifecycle
+├── Config.java               environment-variable configuration
 ├── api/                      HTTP routes, DTOs, error mapping (thin)
 ├── service/LedgerService     double-entry rules, locking, FX conversion, reconciliation
 ├── idempotency/              exactly-once execution, Redis cache (optional)
 ├── domain/                   records, sealed exception hierarchy, currency rules
 ├── fx/                       rate provider interface + static reference rates
 └── db/                       Hikari pool, Flyway migrations, jOOQ context
+src/main/resources
+├── db/migration/             V1 schema, V2 insertion-order columns (jOOQ classes are generated from these)
+└── public/                   the dashboard: index.html, app.css, app.js
+src/test/groovy/              Spock specs and the local dev server (runLocal)
+src/gatling/java/             Gatling load-test simulation
+docs/                         load-test results, screenshots
 ```
 
 ## Design decisions
@@ -112,21 +161,24 @@ POST /transfers  Idempotency-Key: k1
 - Rates live behind `FxRateProvider`; the static EUR-based table is a stand-in for a live feed.
 
 ### 6. Ordering
-Entries carry a `GENERATED ALWAYS AS IDENTITY` sequence. Statements are ordered by it, not by timestamp:
-wall-clock timestamps collide and aren't monotonic (the test suite caught this on Windows, where the clock is coarse).
-The `(account_id, seq DESC)` index serves "latest N entries" as a single backward range scan.
+Entries, accounts and transactions carry a `GENERATED ALWAYS AS IDENTITY` sequence (`seq`). Every
+"newest first" list is ordered by it, not by timestamp: wall-clock timestamps collide and aren't monotonic. The test
+suite caught this twice on Windows, where the clock is coarse. Indexes on `seq` (and `(account_id, seq DESC)` for
+statements) serve "latest N" as a single backward index scan. The columns on accounts and transactions were added by
+a second Flyway migration, `V2__insertion_order.sql`, rather than by editing V1.
 
 ## API
 
 | Method | Path | Notes |
 |---|---|---|
+| `GET` | `/` | the dashboard |
 | `GET` | `/accounts?limit=50` | user accounts, newest first, 1–200 |
 | `POST` | `/accounts` | `{"ownerId":"alice","currency":"EUR"}` → 201 |
 | `GET` | `/accounts/{id}` | balance as a string at currency scale |
 | `GET` | `/accounts/{id}/entries?limit=50` | newest first, 1–200 |
 | `POST` | `/deposits` | **requires `Idempotency-Key`** · `{"accountId":"…","amount":"500.00"}` |
 | `POST` | `/transfers` | **requires `Idempotency-Key`** · `{"fromAccountId":"…","toAccountId":"…","amount":"100.00"}` |
-| `GET` | `/transactions?limit=50` | latest transactions with their entries (one query for all entries) |
+| `GET` | `/transactions?limit=50` | latest transactions with their entries (one query for all entries, not one per row) |
 | `GET` | `/transactions/{id}` | transaction with its journal entries |
 | `GET` | `/fx/rate?from=EUR&to=USD` | |
 | `GET` | `/admin/reconciliation` | ledger invariants |
@@ -145,36 +197,23 @@ curl -s -X POST localhost:8080/transfers -H 'Content-Type: application/json' -H 
      -d '{"fromAccountId":"<alice-id>","toAccountId":"<bob-id>","amount":"100.00"}'
 ```
 
-## Running it
-
-**Zero setup** (needs only JDK 21; starts a throwaway PostgreSQL via Docker, or embedded binaries without Docker):
-```bash
-./gradlew runLocal
-```
-
-**Full stack** with PostgreSQL 16 and Redis 7:
-```bash
-docker compose up --build
-```
-
-Configuration (environment variables): `PORT` (8080), `DB_URL`, `DB_USER`, `DB_PASSWORD`, `DB_POOL_SIZE` (20),
-`REDIS_URL` (optional; without it idempotency is served from PostgreSQL alone).
-
 ## Testing
 
 ```bash
-./gradlew build      # compile, all Spock specs, 90% coverage gate
+./gradlew build      # generate jOOQ classes, compile, run all specs, enforce the 90% coverage gate
 ```
 
-Specs run against **real PostgreSQL**: Testcontainers in CI, embedded PostgreSQL locally if Docker is absent.
-The Redis integration spec runs wherever Docker is available. Coverage report: `build/reports/jacoco/test/html`.
+72 tests. Specs run against **real PostgreSQL**: Testcontainers in CI, embedded PostgreSQL locally if Docker is
+absent. The Redis integration spec runs wherever Docker is available (it is skipped otherwise). Reports:
+`build/reports/tests/test` and `build/reports/jacoco/test/html`.
 
 | Spec | Focus |
 |---|---|
 | `LedgerServiceSpec` | double-entry rules, FX routing and rounding, validation, DB-level overdraft guard, reconciliation |
 | `ConcurrentTransfersSpec` | 10,000 concurrent mixed-currency transfers: zero drift, no overdrafts, no deadlocks |
 | `IdempotencyServiceSpec` | replay, payload mismatch, failed-request retry, 50-way race, cache-after-commit |
-| `LedgerApiSpec` | end-to-end HTTP flow, status codes, error contract |
+| `LedgerApiSpec` | end-to-end HTTP flow, status codes, error contract, list endpoints, the dashboard page |
+| `CurrenciesSpec`, `StaticFxRateProviderSpec`, `ConfigSpec` | minor-unit rules, cross rates, configuration |
 | `RedisResponseCacheSpec`, `RedisOutageSpec` | cache round trip; graceful degradation when Redis is down |
 
 ## Load testing
@@ -185,22 +224,44 @@ The Redis integration spec runs wherever Docker is available. Coverage report: `
     -Dusers=50 -DtargetRps=1000 -DdurationSeconds=60                  # terminal 2
 ```
 
-`-DtargetRps=0` removes pacing to measure maximum throughput. Measured results, the environment and caveats are in
+`-DtargetRps=0` removes pacing to measure maximum throughput. The measured results (819 req/s at p95 17 ms and
+p99 56 ms paced; 5,316 req/s unpaced; zero failed requests), the environment and the caveats are in
 [docs/load-test-results.md](docs/load-test-results.md).
 
 ## Deployment
 
-`docker build .` produces a non-root JRE 21 image that honours Cloud Run's `PORT`. The manual
-[`deploy.yml`](.github/workflows/deploy.yml) workflow builds, pushes to Artifact Registry and deploys to Cloud Run
-with Cloud SQL and Secret Manager. It needs a GCP project and the repository secrets listed at the top of that file.
+`docker build .` produces a non-root JRE 21 image that honours Cloud Run's `PORT`. CI
+([`ci.yml`](.github/workflows/ci.yml)) builds, tests and builds the image on every push.
+
+The manual [`deploy.yml`](.github/workflows/deploy.yml) workflow builds, pushes to Artifact Registry and deploys
+to Cloud Run with Cloud SQL and Secret Manager, using Workload Identity Federation (no long-lived keys). It needs a
+GCP project and the repository settings listed at the top of that file. **Status:** the workflow is ready but has not
+been run yet.
+
+## Tech stack
+
+| Area | Choice | Why |
+|---|---|---|
+| Language | Java 21 | records, sealed types, pattern matching, virtual threads |
+| HTTP | Javalin 6 | small, explicit SparkJava-style routing; serves the dashboard too |
+| SQL | jOOQ 3.19 | type-safe SQL with full control over locks; classes generated from the migrations |
+| Database | PostgreSQL 16 | ACID, row locks, `NUMERIC`, `ON CONFLICT`, CHECK constraints |
+| Migrations | Flyway 10 | versioned schema, same on every environment |
+| Pool | HikariCP 5 | fixed-size connection pool |
+| Cache | Redis 7 (Jedis) | optional idempotency response cache, fail-open |
+| Tests | Spock 2.3, Testcontainers, embedded PostgreSQL, JaCoCo | readable specs against a real database, coverage gate |
+| Load | Gatling 3.12 | paced and unpaced HTTP load |
+| Delivery | Gradle 8.10, Docker, GitHub Actions, Cloud Run | reproducible builds, CI, container deploy |
 
 ## Possible extensions
 
+- Authentication and per-user authorisation
 - Outbox table + event publishing (Pub/Sub/Kafka) for downstream consumers such as fraud scoring
 - Live FX rates with quote expiry, and spread/fees booked to a revenue account
 - Holds/authorisations (two-phase transfers) for card payments
 - Partitioning `ledger_entries` by time; periodic balance snapshots for very large accounts
+- Metrics and tracing (Micrometer, OpenTelemetry)
 
 ## License
 
-MIT
+[MIT](LICENSE)
