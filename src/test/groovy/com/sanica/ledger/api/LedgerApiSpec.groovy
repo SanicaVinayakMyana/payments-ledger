@@ -146,6 +146,48 @@ class LedgerApiSpec extends LedgerSpecification {
         get('/fx/rate?from=EUR&to=GBP').body == [from: 'EUR', to: 'GBP', rate: '0.85000000']
     }
 
+    def "lists user accounts newest first, without system accounts"() {
+        given:
+        def first = account('EUR', null)
+        def second = account('GBP', null)
+
+        when:
+        def accounts = get('/accounts').body
+
+        then:
+        accounts*.id == [second, first]
+        accounts.every { it.kind == 'USER' }
+        get('/accounts?limit=1').body*.id == [second]
+    }
+
+    def "lists recent transactions newest first, each with its journal entries"() {
+        given:
+        def alice = account('EUR', '50.00')
+        def bob = account('USD', null)
+        def payment = post('/transfers', [fromAccountId: alice, toAccountId: bob, amount: '10.00'], 'listed').body
+
+        when:
+        def transactions = get('/transactions?limit=10').body
+
+        then:
+        transactions*.type == ['TRANSFER', 'DEPOSIT']
+        transactions[0].id == payment.id
+        transactions[0].entries*.amount == ['-10.00', '10.00', '-10.80', '10.80']
+        transactions[1].entries.size() == 2
+        get('/transactions?limit=0').status == 400
+    }
+
+    def "serves the dashboard at the root"() {
+        when:
+        def response = http.send(HttpRequest.newBuilder(URI.create("http://localhost:${app.port()}/")).build(),
+                HttpResponse.BodyHandlers.ofString())
+
+        then:
+        response.statusCode() == 200
+        response.headers().firstValue('Content-Type').get().startsWith('text/html')
+        response.body().contains('<title>Payments Ledger</title>')
+    }
+
     private String account(String currency, String funding) {
         def id = post('/accounts', [ownerId: 'owner', currency: currency]).body.id as String
         if (funding) {

@@ -14,9 +14,24 @@ PostgreSQL 16 · Flyway · Redis · Spock + Testcontainers · Gatling · Docker 
 | 10,000 concurrent transfers, zero drift, no deadlocks | [`ConcurrentTransfersSpec`](src/test/groovy/com/sanica/ledger/service/ConcurrentTransfersSpec.groovy): 32 threads, mixed EUR/USD/GBP |
 | Retries never move money twice | [`IdempotencyServiceSpec`](src/test/groovy/com/sanica/ledger/idempotency/IdempotencyServiceSpec.groovy): 50 clients race on one key, exactly 1 transfer |
 | Throughput and latency | [Gatling results](docs/load-test-results.md): 819 req/s at p95 17 ms / p99 56 ms, 5,316 req/s unpaced |
-| 93.7% line coverage | JaCoCo; the build fails below 90% |
+| 94.2% line coverage | JaCoCo; the build fails below 90% |
 
 ---
+
+## Dashboard
+
+`./gradlew runLocal`, then open **http://localhost:8080**. The same server that hosts the API serves a dashboard
+(plain HTML, CSS and JavaScript in [`src/main/resources/public`](src/main/resources/public), no build step,
+no external CDNs):
+
+- **Accounts:** open accounts, see balances, open a statement drawer per account.
+- **Move money:** deposits and transfers with an auto-generated `Idempotency-Key`, a live FX preview for
+  cross-currency transfers, and a **Send again with the same key** button that shows the replay (no money moves twice).
+- **Recent transactions:** select a row to see its double-entry journal, with each currency's lines summing to zero.
+- **Health and reconciliation** status in the header, and **Load demo data** for an empty ledger.
+
+Money in the browser is summed in integer minor units (`BigInt`), never floats, like the server. User text is
+always inserted as text, never as HTML. Light and dark themes follow the system setting, and the layout works on phones.
 
 ## Architecture
 
@@ -105,11 +120,13 @@ The `(account_id, seq DESC)` index serves "latest N entries" as a single backwar
 
 | Method | Path | Notes |
 |---|---|---|
+| `GET` | `/accounts?limit=50` | user accounts, newest first, 1–200 |
 | `POST` | `/accounts` | `{"ownerId":"alice","currency":"EUR"}` → 201 |
 | `GET` | `/accounts/{id}` | balance as a string at currency scale |
 | `GET` | `/accounts/{id}/entries?limit=50` | newest first, 1–200 |
 | `POST` | `/deposits` | **requires `Idempotency-Key`** · `{"accountId":"…","amount":"500.00"}` |
 | `POST` | `/transfers` | **requires `Idempotency-Key`** · `{"fromAccountId":"…","toAccountId":"…","amount":"100.00"}` |
+| `GET` | `/transactions?limit=50` | latest transactions with their entries (one query for all entries) |
 | `GET` | `/transactions/{id}` | transaction with its journal entries |
 | `GET` | `/fx/rate?from=EUR&to=USD` | |
 | `GET` | `/admin/reconciliation` | ledger invariants |

@@ -113,6 +113,30 @@ public final class LedgerService {
                 .fetch(LedgerService::toEntry);
     }
 
+    /** User accounts, newest first. */
+    public List<Account> listAccounts(int limit) {
+        return dsl.selectFrom(ACCOUNTS)
+                .where(ACCOUNTS.KIND.eq(AccountKind.USER.name()))
+                .orderBy(ACCOUNTS.SEQ.desc())
+                .limit(limit)
+                .fetch(account -> toAccount(account, account.getBalance()));
+    }
+
+    /** Latest transactions first, each with its entries; all entries load in one extra query, not one per row. */
+    public List<LedgerTransaction> recentTransactions(int limit) {
+        List<LedgerTransactionsRecord> transactions = dsl.selectFrom(LEDGER_TRANSACTIONS)
+                .orderBy(LEDGER_TRANSACTIONS.SEQ.desc())
+                .limit(limit)
+                .fetch();
+        Map<UUID, List<Entry>> entries = dsl.selectFrom(LEDGER_ENTRIES)
+                .where(LEDGER_ENTRIES.TRANSACTION_ID.in(transactions.stream().map(LedgerTransactionsRecord::getId).toList()))
+                .orderBy(LEDGER_ENTRIES.LINE_NO)
+                .fetchGroups(LEDGER_ENTRIES.TRANSACTION_ID, LedgerService::toEntry);
+        return transactions.stream()
+                .map(transaction -> toTransaction(transaction, entries.getOrDefault(transaction.getId(), List.of())))
+                .toList();
+    }
+
     public LedgerTransaction getTransaction(UUID id) {
         LedgerTransactionsRecord transaction = dsl.selectFrom(LEDGER_TRANSACTIONS)
                 .where(LEDGER_TRANSACTIONS.ID.eq(id))
@@ -124,6 +148,10 @@ public final class LedgerService {
                 .where(LEDGER_ENTRIES.TRANSACTION_ID.eq(id))
                 .orderBy(LEDGER_ENTRIES.LINE_NO)
                 .fetch(LedgerService::toEntry);
+        return toTransaction(transaction, entries);
+    }
+
+    private static LedgerTransaction toTransaction(LedgerTransactionsRecord transaction, List<Entry> entries) {
         return new LedgerTransaction(
                 transaction.getId(),
                 TransactionType.valueOf(transaction.getType()),

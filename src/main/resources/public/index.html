@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Payments Ledger</title>
+  <meta name="description" content="Dashboard for a multi-currency double-entry payments ledger">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 11h14M9 16h14M9 21h9' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8"/><path d="M9 11h14M9 16h14M9 21h9"/></svg>
+    </span>
+    <div>
+      <h1>Payments Ledger</h1>
+      <p class="subtitle">Double-entry · multi-currency · idempotent</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="pill" id="health-pill"><span class="dot"></span><span>API</span></span>
+    <span class="pill" id="recon-pill"><span class="dot"></span><span>Ledger</span></span>
+    <button class="btn ghost" id="seed-btn" type="button">Load demo data</button>
+    <button class="btn ghost icon-btn" id="refresh-btn" type="button" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="page">
+  <section class="kpis" aria-label="Summary">
+    <article class="kpi">
+      <p class="kpi-label">Customer accounts</p>
+      <p class="kpi-value" id="kpi-accounts">–</p>
+      <p class="kpi-note">across <span id="kpi-currencies">0</span> currencies</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi-label">Funds held</p>
+      <div class="kpi-money" id="kpi-funds"><span class="muted">No balances yet</span></div>
+    </article>
+    <article class="kpi">
+      <p class="kpi-label">Recent transactions</p>
+      <p class="kpi-value" id="kpi-transactions">–</p>
+      <p class="kpi-note" id="kpi-tx-note">deposits and transfers</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi-label">Reconciliation</p>
+      <p class="kpi-value" id="kpi-recon">–</p>
+      <p class="kpi-note" id="kpi-recon-note">every currency must net to 0</p>
+    </article>
+  </section>
+
+  <div class="grid">
+    <section class="card accounts-card" aria-labelledby="accounts-title">
+      <div class="card-head">
+        <div>
+          <h2 id="accounts-title">Accounts</h2>
+          <p class="muted">Balances are kept in the same transaction as their journal entries.</p>
+        </div>
+      </div>
+      <form class="inline-form" id="open-form" autocomplete="off">
+        <label class="field grow">
+          <span>Owner</span>
+          <input name="ownerId" required maxlength="64" placeholder="e.g. alice">
+        </label>
+        <label class="field">
+          <span>Currency</span>
+          <select name="currency" class="currency-select" required></select>
+        </label>
+        <button class="btn primary" type="submit">Open account</button>
+      </form>
+      <div class="table-wrap">
+        <table class="table" id="accounts-table">
+          <thead><tr><th>Owner</th><th>Currency</th><th class="num">Balance</th><th>Account id</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="accounts-empty" hidden>
+          <p><strong>No accounts yet.</strong></p>
+          <p class="muted">Open one above, or click <em>Load demo data</em>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card money-card" aria-labelledby="money-title">
+      <div class="card-head">
+        <div>
+          <h2 id="money-title">Move money</h2>
+          <p class="muted">Every request carries an Idempotency-Key, so retries never pay twice.</p>
+        </div>
+      </div>
+      <div class="segmented" role="tablist">
+        <button type="button" role="tab" class="seg" data-mode="transfer" aria-selected="true">Transfer</button>
+        <button type="button" role="tab" class="seg" data-mode="deposit" aria-selected="false">Deposit</button>
+      </div>
+
+      <form id="money-form" autocomplete="off">
+        <label class="field" data-for="transfer deposit">
+          <span id="from-label">From</span>
+          <select name="from" class="account-select" required></select>
+        </label>
+        <label class="field" data-for="transfer">
+          <span>To</span>
+          <select name="to" class="account-select"></select>
+        </label>
+        <label class="field">
+          <span>Amount</span>
+          <div class="amount-input">
+            <input name="amount" inputmode="decimal" required placeholder="0.00">
+            <span class="suffix" id="amount-ccy">EUR</span>
+          </div>
+        </label>
+        <p class="fx-preview" id="fx-preview" hidden></p>
+        <label class="field">
+          <span>Idempotency-Key</span>
+          <div class="key-input">
+            <input name="key" required maxlength="128" spellcheck="false">
+            <button class="btn ghost small" type="button" id="new-key-btn">New key</button>
+          </div>
+        </label>
+        <button class="btn primary block" type="submit" id="submit-btn">Send transfer</button>
+      </form>
+
+      <div class="result" id="result" hidden>
+        <div class="result-head">
+          <span class="status" id="result-status"></span>
+          <span class="badge" id="result-replayed" hidden>Replayed · no money moved</span>
+        </div>
+        <p class="result-body" id="result-body"></p>
+        <div class="result-actions">
+          <button class="btn ghost small" type="button" id="retry-btn">Send again with the same key</button>
+          <code class="key-chip" id="result-key"></code>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="tx-title">
+    <div class="card-head">
+      <div>
+        <h2 id="tx-title">Recent transactions</h2>
+        <p class="muted">Select a row to see its journal entries. Each currency sums to zero.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="table" id="tx-table">
+        <thead><tr><th>Time</th><th>Type</th><th>From</th><th>To</th><th class="num">Sent</th><th class="num">Received</th><th class="num">Rate</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="tx-empty" hidden>
+        <p><strong>No transactions yet.</strong></p>
+        <p class="muted">Make a deposit to get started.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-backdrop" data-close></div>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-head">
+      <div>
+        <p class="muted small-caps" id="drawer-kind">Account</p>
+        <h2 id="drawer-title">–</h2>
+      </div>
+      <button class="btn ghost icon-btn" type="button" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <p class="drawer-balance" id="drawer-balance">–</p>
+    <code class="key-chip" id="drawer-id"></code>
+    <h3>Statement</h3>
+    <ul class="statement" id="drawer-entries"></ul>
+  </div>
+</aside>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<footer class="footer">
+  Java 21 · Javalin · jOOQ · PostgreSQL · Redis ·
+  <a href="https://github.com/SanicaVinayakMyana/payments-ledger" target="_blank" rel="noopener">Source on GitHub</a>
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>

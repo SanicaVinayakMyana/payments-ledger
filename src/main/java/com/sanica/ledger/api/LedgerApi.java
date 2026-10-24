@@ -25,6 +25,7 @@ import com.sanica.ledger.service.LedgerService;
 import io.javalin.Javalin;
 import io.javalin.http.ContentType;
 import io.javalin.http.Context;
+import io.javalin.http.staticfiles.Location;
 import io.javalin.json.JavalinJackson;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -66,14 +67,18 @@ public final class LedgerApi {
             // Virtual threads: blocking JDBC calls no longer pin a platform thread per request.
             config.useVirtualThreads = true;
             config.jsonMapper(new JavalinJackson(mapper, true));
+            // The dashboard: plain HTML/CSS/JS served from the classpath at "/", talking to the same API.
+            config.staticFiles.add("/public", Location.CLASSPATH);
         });
 
         app.get("/health", ctx -> ctx.json(Map.of("status", "UP")));
+        app.get("/accounts", api::listAccounts);
         app.post("/accounts", api::createAccount);
         app.get("/accounts/{id}", api::getAccount);
         app.get("/accounts/{id}/entries", api::listEntries);
         app.post("/deposits", api::deposit);
         app.post("/transfers", api::transfer);
+        app.get("/transactions", api::listTransactions);
         app.get("/transactions/{id}", api::getTransaction);
         app.get("/fx/rate", api::fxRate);
         app.get("/admin/reconciliation", api::reconciliation);
@@ -95,12 +100,24 @@ public final class LedgerApi {
         ctx.json(AccountResponse.from(ledger.getAccount(uuidParam(ctx, "id"))));
     }
 
+    private void listAccounts(Context ctx) {
+        ctx.json(ledger.listAccounts(pageSize(ctx)).stream().map(AccountResponse::from).toList());
+    }
+
+    private void listTransactions(Context ctx) {
+        ctx.json(ledger.recentTransactions(pageSize(ctx)).stream().map(TransactionResponse::from).toList());
+    }
+
     private void listEntries(Context ctx) {
+        ctx.json(ledger.entries(uuidParam(ctx, "id"), pageSize(ctx)).stream().map(EntryResponse::from).toList());
+    }
+
+    private static int pageSize(Context ctx) {
         int limit = intQuery(ctx, "limit", DEFAULT_PAGE_SIZE);
         if (limit < 1 || limit > MAX_PAGE_SIZE) {
             throw new ValidationException("limit must be between 1 and " + MAX_PAGE_SIZE);
         }
-        ctx.json(ledger.entries(uuidParam(ctx, "id"), limit).stream().map(EntryResponse::from).toList());
+        return limit;
     }
 
     private void deposit(Context ctx) {
