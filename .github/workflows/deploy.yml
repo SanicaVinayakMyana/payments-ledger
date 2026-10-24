@@ -1,0 +1,45 @@
+name: Deploy to Cloud Run
+
+# Manual trigger. Requires these repository settings:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER, secrets.GCP_SERVICE_ACCOUNT
+#   vars.GCP_PROJECT_ID, vars.GCP_REGION, vars.CLOUD_SQL_INSTANCE (project:region:instance)
+#   Secret Manager secrets: ledger-db-url, ledger-db-user, ledger-db-password, ledger-redis-url
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ledger/payments-ledger:${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push image
+        run: |
+          gcloud auth configure-docker ${{ vars.GCP_REGION }}-docker.pkg.dev --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy
+        run: |
+          gcloud run deploy payments-ledger \
+            --image "$IMAGE" \
+            --region ${{ vars.GCP_REGION }} \
+            --add-cloudsql-instances ${{ vars.CLOUD_SQL_INSTANCE }} \
+            --set-secrets DB_URL=ledger-db-url:latest,DB_USER=ledger-db-user:latest,DB_PASSWORD=ledger-db-password:latest,REDIS_URL=ledger-redis-url:latest \
+            --set-env-vars DB_POOL_SIZE=10 \
+            --cpu 1 --memory 512Mi --concurrency 80 --max-instances 3 \
+            --no-allow-unauthenticated

@@ -1,0 +1,148 @@
+plugins {
+    id 'java'
+    id 'groovy'
+    id 'application'
+    id 'jacoco'
+    id 'org.jooq.jooq-codegen-gradle' version '3.19.15'
+    id 'io.gatling.gradle' version '3.12.0'
+}
+
+group = 'com.sanica'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    jooqVersion = '3.19.15'
+    jacksonVersion = '2.18.1'
+    testcontainersVersion = '1.20.3'
+}
+
+dependencies {
+    implementation 'io.javalin:javalin:6.3.0'
+    implementation "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:$jacksonVersion"
+    implementation "org.jooq:jooq:$jooqVersion"
+    implementation 'org.postgresql:postgresql:42.7.4'
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+    implementation 'org.flywaydb:flyway-core:10.20.1'
+    implementation 'org.flywaydb:flyway-database-postgresql:10.20.1'
+    implementation 'redis.clients:jedis:5.2.0'
+    implementation 'org.slf4j:slf4j-simple:2.0.16'
+
+    jooqCodegen "org.jooq:jooq-meta-extensions:$jooqVersion"
+
+    testImplementation platform('org.spockframework:spock-bom:2.3-groovy-4.0')
+    testImplementation 'org.spockframework:spock-core'
+    testImplementation 'org.apache.groovy:groovy:4.0.24'
+    testImplementation "org.testcontainers:testcontainers:$testcontainersVersion"
+    testImplementation "org.testcontainers:postgresql:$testcontainersVersion"
+    testImplementation 'io.zonky.test:embedded-postgres:2.0.7'
+}
+
+// Type-safe jOOQ classes are generated straight from the Flyway migrations, so no database is needed to build.
+def jooqOutput = layout.buildDirectory.dir('generated-sources/jooq')
+
+jooq {
+    configuration {
+        generator {
+            database {
+                name = 'org.jooq.meta.extensions.ddl.DDLDatabase'
+                properties {
+                    property {
+                        key = 'scripts'
+                        value = 'src/main/resources/db/migration/*.sql'
+                    }
+                    property {
+                        key = 'sort'
+                        value = 'flyway'
+                    }
+                    property {
+                        key = 'defaultNameCase'
+                        value = 'lower'
+                    }
+                }
+            }
+            target {
+                packageName = 'com.sanica.ledger.jooq'
+                directory = jooqOutput.get().asFile.path
+            }
+        }
+    }
+}
+
+sourceSets.main.java.srcDir jooqOutput
+
+tasks.named('compileJava') {
+    dependsOn tasks.named('jooqCodegen')
+}
+
+application {
+    mainClass = 'com.sanica.ledger.Application'
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+    maxHeapSize = '1g'
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = true
+    }
+    finalizedBy tasks.named('jacocoTestReport')
+}
+
+// Generated jOOQ classes are excluded so coverage reflects hand-written code only.
+def coveredClasses = files(sourceSets.main.output.classesDirs.collect {
+    fileTree(it) { exclude 'com/sanica/ledger/jooq/**' }
+})
+
+jacocoTestReport {
+    dependsOn tasks.named('test')
+    classDirectories.setFrom(coveredClasses)
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+jacocoTestCoverageVerification {
+    classDirectories.setFrom(coveredClasses)
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                minimum = 0.90
+            }
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('jacocoTestCoverageVerification')
+}
+
+// Starts the API on a throwaway PostgreSQL (Docker if available, embedded binaries otherwise).
+tasks.register('runLocal', JavaExec) {
+    group = 'application'
+    description = 'Runs the ledger locally with a disposable PostgreSQL; no setup required.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.sanica.ledger.LocalDevServer'
+}
+
+gatling {
+    systemProperties = [
+        baseUrl        : System.getProperty('baseUrl', 'http://localhost:8080'),
+        users          : System.getProperty('users', '50'),
+        targetRps      : System.getProperty('targetRps', '1000'),
+        durationSeconds: System.getProperty('durationSeconds', '60')
+    ]
+}
